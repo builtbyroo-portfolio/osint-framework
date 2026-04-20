@@ -8,7 +8,7 @@
 #  discovered entities (emails, names, phones, IPs, domains) from tool
 #  output and investigates them to the configured depth level.
 # ═══════════════════════════════════════════════════════════════════════════
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
