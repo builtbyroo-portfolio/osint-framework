@@ -1,0 +1,16 @@
+# Investigation output — never commit
+/tmp/
+*.zip
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
