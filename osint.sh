@@ -136,7 +136,7 @@ collect() {
             for p in "${parts[@]}"; do
                 p="${p#"${p%%[![:space:]]*}"}"
                 p="${p%"${p##*[![:space:]]}"}"
-                [[ -n "$p" ]] && _arr+=("$p") && (( added++ ))
+                [[ -n "$p" ]] && _arr+=("$p") && added=$(( added + 1 ))
             done
         done <<< "$raw"
     done
