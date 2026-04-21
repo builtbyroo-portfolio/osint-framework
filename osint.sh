@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-#  osint.sh v2.0  —  Interactive OSINT Investigation Framework
+#  osint.sh v3.0  —  Interactive OSINT Investigation Framework
 #  Output : ~/Desktop/{name}_investigation.zip
 #  Import : Maltego  ·  Burp Suite  ·  recon-ng  ·  SpiderFoot
 #
@@ -14,10 +14,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 DATE_HUMAN="$(date '+%Y-%m-%d %H:%M')"
 DESKTOP="${HOME}/Desktop"
-VERSION="2.0"
+VERSION="3.0"
 
 MAIGRET_BIN="/home/raze/.local/share/virtualenvs/operator_toolbox-X2A_8faL/bin/maigret"
 SUBFINDER_BIN="${SCRIPT_DIR}/../subfinder"
+
+# ── Optional API keys (set as env vars, skipped if absent) ──────────────────
+# export WIGLE_API_KEY="..."       SSID geolocation
+# export SHODAN_API_KEY="..."      IP intelligence
+# export HIBP_API_KEY="..."        Have I Been Pwned breach lookups
+# export ABUSEIPDB_API_KEY="..."   IP abuse/reputation scoring
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 R='\033[0;31m'  Y='\033[1;33m'  G='\033[0;32m'  C='\033[0;36m'
@@ -47,7 +53,7 @@ SAFE_NAME=""
 
 RUN_EMAIL=false   RUN_USERNAME=false  RUN_PHONE=false
 RUN_DOMAIN=false  RUN_IP=false        RUN_NETWORK=false
-RUN_ADDRESS=false
+RUN_ADDRESS=false RUN_FULLNAME=false
 
 # ── Entity tracking — prevents re-investigating the same entity ─────────────
 declare -A KNOWN=()   # key: "type:lc_value"  value: depth investigated at
@@ -289,6 +295,7 @@ select_phases() {
     (( ${#EMAILS[@]}    > 0 )) && RUN_EMAIL=true
     (( ${#USERNAMES[@]} > 0 )) && RUN_USERNAME=true
     (( ${#PHONES[@]}    > 0 )) && RUN_PHONE=true
+    (( ${#FULLNAMES[@]} > 0 )) && RUN_FULLNAME=true
     (( ${#DOMAINS[@]}   > 0 )) && RUN_DOMAIN=true
     (( ${#IPS[@]}       > 0 )) && RUN_IP=true
     (( ${#MACS[@]} > 0 || ${#SSIDS[@]} > 0 )) && RUN_NETWORK=true
@@ -342,6 +349,9 @@ investigate_email() {
             > "${outdir}/harvester_${safe_e}.txt" || true
         ok "theHarvester → harvester_${safe_e}.txt  [${domain}]"
     fi
+
+    # Stage 3: breach data
+    investigate_email_breach "$email" "$outdir"
 }
 
 investigate_username() {
@@ -482,6 +492,9 @@ investigate_ip() {
             shodan host "$ip" 2>/dev/null > "${outdir}/nmap/${safe_i}_shodan.txt" || true
         fi
     fi
+
+    # Stage 3: passive DNS + reputation
+    investigate_ip_passive "$ip" "$outdir"
 }
 
 # Lighter IP scan for pivot passes (no nmap)
@@ -493,7 +506,164 @@ investigate_ip_light() {
     dig +short -x "$ip" 2>/dev/null > "${outdir}/reverse_dns/${safe_i}_rdns.txt" || true
     curl -s --max-time 8 "https://ipinfo.io/${ip}/json" 2>/dev/null \
         | jq '.' 2>/dev/null > "${outdir}/asn/${safe_i}_ipinfo.json" || true
+    investigate_ip_passive "$ip" "$outdir"
     ok "IP light scan done  [${ip}]"
+}
+
+# ── Stage 3: Passive DNS / reputation lookups for IPs ───────────────────────
+investigate_ip_passive() {
+    local ip="$1" outdir="$2"
+    local safe_i="${ip//./_}"
+    local d="${outdir}/passive"
+    mkdir -p "$d"
+
+    # HackerTarget reverse IP — free, no key needed
+    curl -s --max-time 10 \
+        "https://api.hackertarget.com/reverseiplookup/?q=${ip}" 2>/dev/null \
+        > "${d}/${safe_i}_reverseip.txt" || true
+    local count
+    count="$(grep -vc '^$\|error\|API count\|no record' "${d}/${safe_i}_reverseip.txt" 2>/dev/null || echo 0)"
+    ok "Passive DNS (HackerTarget): ${count} domains  [${ip}]"
+
+    # AbuseIPDB reputation (if API key set)
+    local abuse_key="${ABUSEIPDB_API_KEY:-}"
+    if [[ -n "$abuse_key" ]]; then
+        curl -s --max-time 10 \
+            "https://api.abuseipdb.com/api/v2/check?ipAddress=${ip}&maxAgeInDays=90&verbose" \
+            -H "Key: ${abuse_key}" -H "Accept: application/json" 2>/dev/null \
+            | jq '.' 2>/dev/null > "${d}/${safe_i}_abuseipdb.json" || true
+        ok "AbuseIPDB reputation done  [${ip}]"
+    fi
+
+    # Manual lookup reference file — open these in a browser for deeper passive recon
+    {
+        echo "=== Passive / Historical Lookups for ${ip} ==="
+        echo ""
+        echo "[ Passive DNS — historically hosted domains ]"
+        echo "  ViewDNS Reverse IP   : https://viewdns.info/reverseip/?host=${ip}"
+        echo "  SecurityTrails       : https://securitytrails.com/list/ip/${ip}"
+        echo "  RiskIQ (Defender)    : https://community.riskiq.com/search/${ip}"
+        echo ""
+        echo "[ Threat Intelligence ]"
+        echo "  Shodan               : https://www.shodan.io/host/${ip}"
+        echo "  Censys               : https://search.censys.io/hosts/${ip}"
+        echo "  GreyNoise            : https://viz.greynoise.io/ip/${ip}"
+        echo "  VirusTotal           : https://www.virustotal.com/gui/ip-address/${ip}"
+        echo "  AbuseIPDB            : https://www.abuseipdb.com/check/${ip}"
+        echo "  ThreatFox            : https://threatfox.abuse.ch/browse.php?search=ioc%3A${ip}"
+        echo ""
+        echo "[ Geolocation / ISP ]"
+        echo "  IPinfo               : https://ipinfo.io/${ip}"
+        echo "  ip-api               : http://ip-api.com/json/${ip}"
+        echo "  MaxMind              : https://www.maxmind.com/en/geoip-demo"
+    } > "${d}/${safe_i}_manual_lookups.txt"
+}
+
+# ── Stage 3: Breach / leak data for emails ──────────────────────────────────
+investigate_email_breach() {
+    local email="$1" outdir="$2"
+    local safe_e="${email//[@.]/_}"
+    local d="${outdir}/breach"
+    mkdir -p "$d"
+
+    # HIBP breach check (requires HIBP_API_KEY)
+    local hibp_key="${HIBP_API_KEY:-}"
+    if [[ -n "$hibp_key" ]]; then
+        local result
+        result="$(curl -s --max-time 10 \
+            "https://haveibeenpwned.com/api/v3/breachedaccount/${email}?truncateResponse=false" \
+            -H "hibp-api-key: ${hibp_key}" \
+            -H "User-Agent: OSINT-Investigation-Framework/3.0" 2>/dev/null)"
+        echo "$result" | jq '.' 2>/dev/null > "${d}/hibp_${safe_e}.json" || true
+        local breach_count
+        breach_count="$(echo "$result" | jq 'length // 0' 2>/dev/null || echo 0)"
+        ok "HIBP: ${breach_count} breach(es)  [${email}]"
+    else
+        warn "HIBP_API_KEY not set — breach check skipped  [${email}]"
+    fi
+
+    # Manual breach/leak lookup reference file
+    {
+        echo "=== Breach / Leak Lookups for ${email} ==="
+        echo ""
+        echo "[ Automated (set HIBP_API_KEY for auto-check) ]"
+        echo "  HaveIBeenPwned  : https://haveibeenpwned.com/account/${email}"
+        echo ""
+        echo "[ Manual (paid / requires account) ]"
+        echo "  DeHashed        : https://dehashed.com/search?query=${email}"
+        echo "  IntelligenceX   : https://intelx.io/?s=${email}"
+        echo "  Snusbase        : https://snusbase.com (search: ${email})"
+        echo "  LeakCheck       : https://leakcheck.io (search: ${email})"
+        echo "  GhostProject    : https://ghostproject.fr (search: ${email})"
+        echo ""
+        echo "[ Paste Sites (check for leaked data) ]"
+        echo "  PasteHunter     : https://pastehunter.com"
+        echo "  Google dork     : site:pastebin.com \"${email}\""
+    } > "${d}/manual_breach_${safe_e}.txt"
+}
+
+# ── Stage 3: Person / identity investigation ────────────────────────────────
+investigate_person() {
+    local name="$1" outdir="$2"
+    local safe_n="${name// /_}"
+    local fn="${name%% *}"
+    local ln="${name##* }"
+    local encoded_name
+    encoded_name="$(python3 -c "import urllib.parse; print(urllib.parse.quote('${name}'))" \
+                   2>/dev/null || echo "${name// /+}")"
+    local d="${outdir}/person_osint"
+    mkdir -p "$d"
+
+    # Run sherlock on name-derived candidates (already queued via pivot username derivation)
+    # Generate pre-built people-search and social links for manual follow-up
+    {
+        echo "=== Person Investigation — ${name} ==="
+        echo ""
+        echo "[ Public Records / People Finders ]"
+        echo "  WhitePages        : https://www.whitepages.com/name/${encoded_name}"
+        echo "  FastPeopleSearch  : https://www.fastpeoplesearch.com/name/${encoded_name}"
+        echo "  Spokeo            : https://www.spokeo.com/${encoded_name}"
+        echo "  BeenVerified      : https://www.beenverified.com/people/${encoded_name}"
+        echo "  Intelius          : https://www.intelius.com/people/${encoded_name}"
+        echo "  TruthFinder       : https://www.truthfinder.com/people-search/?firstName=${fn}&lastName=${ln}"
+        echo "  PeopleFinder      : https://www.peoplefinder.com/search/?fname=${fn}&lname=${ln}"
+        echo ""
+        echo "[ Social Media ]"
+        echo "  LinkedIn          : https://www.linkedin.com/search/results/people/?keywords=${encoded_name}"
+        echo "  Facebook          : https://www.facebook.com/search/people/?q=${encoded_name}"
+        echo "  Twitter/X         : https://twitter.com/search?q=%22${encoded_name}%22&f=user"
+        echo "  Instagram         : https://www.instagram.com/explore/search/keyword/?q=${encoded_name}"
+        echo "  TikTok            : https://www.tiktok.com/search?q=${encoded_name}"
+        echo ""
+        echo "[ Search Engine Dorks ]"
+        echo "  Google            : https://www.google.com/search?q=%22${encoded_name}%22"
+        echo "  Bing              : https://www.bing.com/search?q=%22${encoded_name}%22"
+        echo "  DuckDuckGo        : https://duckduckgo.com/?q=%22${encoded_name}%22"
+        echo "  Google (+ phone)  : https://www.google.com/search?q=%22${encoded_name}%22+phone"
+        echo "  Google (+ address): https://www.google.com/search?q=%22${encoded_name}%22+address"
+        echo ""
+        echo "[ Professional / Corporate ]"
+        echo "  ZoomInfo          : https://www.zoominfo.com/person/${encoded_name}"
+        echo "  Hunter.io         : https://hunter.io (search by domain)"
+        echo "  RocketReach       : https://rocketreach.co/search?name=${encoded_name}"
+        echo ""
+        echo "[ Court / Legal Records ]"
+        echo "  CourtListener     : https://www.courtlistener.com/?q=%22${encoded_name}%22&type=p"
+        echo "  Judyrecords       : https://www.judyrecords.com/search?q=${encoded_name}"
+        echo "  PACER             : https://www.pacer.gov (federal court — requires account)"
+        echo ""
+        echo "[ Voter / Property Records ]"
+        echo "  VoterRecords      : https://www.voterrecords.com/search?search[name]=${encoded_name}"
+        echo "  PropertyShark     : https://www.propertyshark.com (county property records)"
+        echo ""
+        echo "[ Image Search (if photo obtained) ]"
+        echo "  Google Images     : https://images.google.com (upload photo)"
+        echo "  TinEye            : https://tineye.com"
+        echo "  PimEyes           : https://pimeyes.com (facial recognition)"
+        echo "  Yandex Images     : https://yandex.com/images"
+    } > "${d}/${safe_n}_search_links.txt"
+    ok "Person search links saved  [${name}]"
+    log "[person] ${name}"
 }
 
 
@@ -524,6 +694,15 @@ phase_phone() {
     for phone in "${PHONES[@]}"; do
         step "$phone"; log "Phone: $phone"
         investigate_phone "$phone" "${OUTDIR}/phone_osint"
+    done
+}
+
+phase_fullname() {
+    section "PHASE: PERSON OSINT  (depth 0)"
+    mkdir -p "${OUTDIR}/person_osint"
+    for name in "${FULLNAMES[@]}"; do
+        step "$name"; log "Person: $name"
+        investigate_person "$name" "${OUTDIR}"
     done
 }
 
@@ -821,10 +1000,17 @@ ip_osint/{whois,reverse_dns,asn}}
         done
     fi
 
-    # ── Names: log them for Maltego, derive username candidates (already done) ─
+    # ── Names: full person investigation + derive username candidates ───────────
     if (( ${#PIVOT_NAMES[@]} > 0 )); then
+        section "PIVOT depth ${depth}  —  PERSONS  (${#PIVOT_NAMES[@]})"
+        mkdir -p "${d}/person_osint"
         log "[depth=${depth}] Discovered names: ${PIVOT_NAMES[*]}"
-        for name in "${PIVOT_NAMES[@]}"; do mark_known name "$name"; done
+        for name in "${PIVOT_NAMES[@]}"; do
+            step "$name" "discovered from WHOIS"
+            log "[depth=${depth}] Person pivot: $name"
+            investigate_person "$name" "$d"
+            mark_known name "$name"
+        done
     fi
 }
 
@@ -1210,6 +1396,7 @@ main() {
     $RUN_EMAIL    && phase_email
     $RUN_USERNAME && phase_username
     $RUN_PHONE    && phase_phone
+    $RUN_FULLNAME && phase_fullname
     $RUN_DOMAIN   && phase_domain
     $RUN_IP       && phase_ip
     $RUN_NETWORK  && phase_network
