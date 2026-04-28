@@ -862,6 +862,26 @@ CFGEOF
     # ═══════════════════════════════════════════════════════
     run_phase 1 "se_surface_map" "se_surface_map.sh" --domains "$DOMAINS_FILE" -d "$primary_domain" -o "$OUT_DIR" -t "$THREADS"
 
+    # Fallback: if Phase 1 found nothing (SPA, CDN-fronted, no static paths),
+    # seed output files from raw domain list so downstream phases aren't skipped
+    if [ ! -s "${OUT_DIR}/surface_urls.txt" ]; then
+        warn "Phase 1 found no surface URLs — seeding from raw domain list for downstream phases"
+        while IFS= read -r _d; do
+            [ -z "$_d" ] && continue
+            echo "https://${_d}" >> "${OUT_DIR}/surface_urls.txt"
+            echo "https://${_d}" >> "${OUT_DIR}/sensitive_urls.txt"
+        done < <(sed 's/\*\.//' "$DOMAINS_FILE" | sort -u)
+        log "Seeded $(count_lines "${OUT_DIR}/surface_urls.txt") base URLs"
+    fi
+    if [ ! -s "${OUT_DIR}/oauth_urls.txt" ]; then
+        while IFS= read -r _d; do
+            [ -z "$_d" ] && continue
+            for _p in "oauth/authorize" "oauth2/authorize" "connect/authorize" "auth" ".well-known/openid-configuration"; do
+                echo "https://${_d}/${_p}" >> "${OUT_DIR}/oauth_urls.txt"
+            done
+        done < <(sed 's/\*\.//' "$DOMAINS_FILE" | sort -u)
+    fi
+
     # ═══════════════════════════════════════════════════════
     #  Phase 2: Email Security (SPF/DKIM/DMARC)
     # ═══════════════════════════════════════════════════════
